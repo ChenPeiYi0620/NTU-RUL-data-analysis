@@ -58,6 +58,7 @@ def read_rul_data(filepath, default_spd=0, default_trq=0, default_pwr=0, default
         print(f"檔案 {filepath} 不存在，請確認檔案路徑。")
     return data_read
 
+def sort_rul_files(rul_file_path)
 
 if __name__ == '__main__':
     # plot the read data

@@ -166,7 +166,7 @@ class CCAE_model_build_train:
     
     # CCAE 模型建構 (四種模式) 
     def build_CCAE_model(input_dim_list, sequence_length=1024, condition_dim=1, model_name='test_model.keras', file_name='test_model.png'):
-        inputs = []
+        inputs = [] # for first layer inputs
         condition_input = Input(shape=(condition_dim,), name='condition') 
         repeated_condition = RepeatVector(sequence_length, name='repeated_condition')(condition_input)
         
@@ -238,13 +238,16 @@ class CCAE_model_build_train:
         return full_model, encoder_model, decoder_model
 
 
-    def CCAE_train(kearas_model, model_type:str,  model_name=[],  input_data=[], label=1,  epochs=20, batch_size=10):
+    def CCAE_train(kearas_model, model_type:str,  model_file_path=[],  input_data=[], label=1,  epochs=20, batch_size=10):
+        
         # 可直接輸入模型或根據位置載入模型
         # 如果模型輸入位為模型路徑，則直接導入
         if isinstance(kearas_model, str):
             print("Loading model from path:", kearas_model)
             model_name= kearas_model
             kearas_model = load_model(kearas_model)
+        else: 
+            print("inout the model is keras model, not path")
 
         # 製作標籤
         Label = np.full(input_data.shape[0], label)
@@ -257,18 +260,18 @@ class CCAE_model_build_train:
         for i in range(input_data.shape[2]):
             if model_type == 'I2_in_I2_out':
                 train_input_data=[train_data[:,:,i] for i in range(input_data.shape[2])]
-                val_input_data=[val_data[:,:,i] for i in range(input_data.shape[2])]
                 train_output_data=train_input_data.copy()
+                val_input_data=[val_data[:,:,i] for i in range(input_data.shape[2])]
                 val_output_data=val_input_data.copy()
             if model_type == 'V2_in_I2_out':
                 train_input_data=[train_data[:,:,i] for i in range(0,2)]
-                val_input_data=[val_data[:,:,i] for i in range(0,2)]
                 train_output_data=[train_data[:,:,i] for i in range(2,4)]
-                val_output_data=[train_data[:,:,i] for i in range(2,4)]
-            if model_type == 'V2I2_in_V2I2_outs':
-                train_input_data=[train_data[:,:,i] for i in range(input_data.shape[2]-1)]
-                val_input_data=[val_data[:,:,i] for i in range(input_data.shape[2]-1)]
+                val_input_data=[val_data[:,:,i] for i in range(0,2)]
+                val_output_data=[val_data[:,:,i] for i in range(2,4)]
+            if model_type == 'V2I2_in_V2I2_out':
+                train_input_data=[train_data[:,:,i] for i in range(input_data.shape[2])]
                 train_output_data=train_input_data.copy()
+                val_input_data=[val_data[:,:,i] for i in range(input_data.shape[2])]
                 val_output_data=val_input_data.copy()
         
         
@@ -277,7 +280,7 @@ class CCAE_model_build_train:
                 epochs= epochs,
                 batch_size=batch_size,
                 validation_data=(val_input_data + [val_labels.reshape(-1, 1)], val_output_data))
-        kearas_model.save(model_name)
+        kearas_model.save(model_file_path)
     
         return kearas_model, history
     
@@ -432,7 +435,12 @@ def write_csv(data1, data2):
         writer.writerows(csv_output)
         
 def get_initial_files_datalist(file_paths, initial_rfactor=0.1, input_name="Current alpha"):
-    """This function is used to get the initial files for training."""
+    """This function is used to get the initial files for training.
+    輸入多個資料夾路徑，並讀取其中的initial_rfactor比例的.parquet檔案，返回初始的資料列表。
+    並回傳單列數據
+    """
+    
+    
     initial_files = []
     initial_datalist=[]
     for file_path in file_paths:
