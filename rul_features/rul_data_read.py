@@ -268,7 +268,7 @@ def read_rul_data(filepath, default_spd=0, default_trq=0, default_pwr=0, default
                         
             data_read = {
                 "Unix Time": [df_loaded["Unix Time"].iloc[0]],
-                "Speed": [df_loaded["Speed"].iloc[0]],
+                "Speed": [df_loaded["Speed"].iloc[0]], # unit rpm
                 "Torque": [df_loaded["Torque"].iloc[0]],
                 "Power": [df_loaded["Power"].iloc[0]],
                 "Efficiency": [df_loaded["Efficiency"].iloc[0]],
