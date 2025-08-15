@@ -4,6 +4,7 @@ import pyarrow
 import matplotlib.pyplot  as plt
 import time
 import numpy as np
+import math
 from scipy.signal import butter, filtfilt
 
 # function for raw data revisition
@@ -256,9 +257,123 @@ def estimate_torque(data_read, speed_v=1800, debug=False):
         plt.show(block=False)
     # return the torque value and the estimated flux
     return torque_v, alpha_compensated_values, beta_compensated_values, v_alpha, v_beta, power_sts
+ 
+def voltage_calibrate(raw_voltage, threshold, speed=1):
+   
+    check_length=int (20000/(speed/3000*200)/4) # 取1/4 週期作為檢測窗長度
+    calib_signal = np.copy(raw_voltage)
+    
+    # 從尾端往前掃描
+    for i in range(len(raw_voltage) - 1, 0, -1):
+        #檢查訊號差突變點
+        if raw_voltage[i]- raw_voltage[i - 1] > threshold and  raw_voltage[i]*raw_voltage[i - 1]<0:
+            closest_idx = None
+            closest_val = float('inf') 
+            for idx in range(max(i-check_length,0), i):
+                if (abs(raw_voltage[idx]))<closest_val:
+                    closest_val = abs(raw_voltage[idx])
+                    closest_idx = idx
+            # print(f"Calibrate from {max(i-check_length,0)} to {closest_idx}")
+            calib_signal[closest_idx:i]= abs(raw_voltage[closest_idx:i])
 
-def read_rul_data(filepath, default_spd=0, default_trq=0, default_pwr=0, default_eff=0):
+    # 第二遍 從頭掃描
+    for i in range(len(raw_voltage)):
+        #檢查訊號差突變點
+        if raw_voltage[i]- raw_voltage[i - 1] < -threshold and  raw_voltage[i]*raw_voltage[i - 1]<0:
+            closest_idx = None
+            closest_val = float('inf') 
+            for idx in range(i, min(i+check_length,len(raw_voltage))):
+                if (abs(raw_voltage[idx]))<closest_val:
+                    closest_val = abs(raw_voltage[idx])
+                    closest_idx = idx
+            # print(f"Calibrate from {closest_idx} to {min(i+check_length,len(raw_voltage))}")
+            calib_signal[i:closest_idx]= abs(raw_voltage[i:closest_idx])
+            
+    return calib_signal
 
+def voltage_calibrate_stator(v_alpha, v_beta, threshold, speed=1 ):
+    #轉換回 vsensing 線間電壓
+    v_ab=(3*v_alpha-math.sqrt(3)*v_beta)/2
+    v_bc=math.sqrt(3)*(v_beta)
+    # 對 v_ab 和 v_bc 進行校準
+    v_ab=voltage_calibrate(v_ab, threshold, speed)
+    v_bc=voltage_calibrate(v_bc, threshold, speed)
+    # v_ab=voltage_calibrate_v2(v_ab, threshold, speed)
+    # v_bc=voltage_calibrate_v2(v_bc, threshold, speed)
+    #轉換回 alpha beta 電壓
+    v_alpha = (2*v_ab + v_bc)/3
+    v_beta = v_bc/math.sqrt(3)
+    return v_alpha, v_beta
+
+def fft_integration(raw_data_alpha, raw_data_beta, Wc=10, fs=20000):
+    """
+    輸入複數訊號，進行FFT轉換後積分在反FFT回來
+    Wc 為截止頻率
+    Perform FFT integration on the provided raw data.
+    :param raw_data_alpha: Raw data for alpha component
+    :param raw_data_beta: Raw data for beta component
+    :return: Integrated alpha and beta components
+    """    
+    
+    # t = np.arange(0, len(raw_data_alpha))/ fs  # 時間向量
+    
+    # FFT
+    raw_alpha_fft = np.fft.fft(raw_data_alpha)
+    raw_beta_fft = np.fft.fft(raw_data_beta)
+    
+    freqs = np.fft.fftfreq(len(raw_data_alpha), d=1/fs)
+    
+    # 積分操作：除以 j2πf，排除 f=0 的成分
+    raw_alpha_integrated = np.zeros_like(raw_alpha_fft)
+    raw_beta_integrated = np.zeros_like(raw_beta_fft)
+    
+    for i, f in enumerate(freqs):
+        if np.abs(f) > Wc:  # 截止頻率Hz
+            # print('fft integrate')
+            raw_alpha_integrated[i] = raw_alpha_fft[i] / (1j * 2 * np.pi * f)
+            raw_beta_integrated[i] = raw_beta_fft[i] / (1j * 2 * np.pi * f)
+        else:
+            raw_alpha_integrated[i] = 0  
+            raw_beta_integrated[i] = 0
+
+    # IFFT
+    raw_alpha_integrated_ifft = np.fft.ifft(raw_alpha_integrated)
+    raw_beta_integrated_ifft = np.fft.ifft(raw_beta_integrated)
+
+    # 畫圖
+    # plt.figure()
+    # # plt.plot(t, raw_alpha_integrated, label='integrated fft')
+    # # plt.plot(freqs, raw_alpha_fft, label='Original signal')
+    # plt.plot(t, raw_alpha_integrated_ifft.real, label='Integrated signal')
+    # plt.xlabel('Time (s)')
+    # plt.legend()
+    # plt.title('Integration via FFT')
+    # plt.grid(True)
+    # plt.show()
+
+    return raw_alpha_integrated_ifft.real, raw_beta_integrated_ifft.real
+
+def calculate_thd(signal):
+    """
+    Calculate Total Harmonic Distortion (THD) of a 1D numpy array.
+    """
+    signal = np.squeeze(signal)
+    N = len(signal)
+    fft_vals = np.fft.fft(signal)
+    fft_freqs = np.fft.fftfreq(N)
+    fft_mags = np.abs(fft_vals)[:N // 2]
+    # Find the index of the fundamental frequency (ignore DC)
+    fundamental_idx = np.argmax(fft_mags[1:]) + 1
+    fundamental_mag = fft_mags[fundamental_idx]
+    # Harmonics: 2nd, 3rd, ..., up to Nyquist
+    harmonics_mag = np.sqrt(np.sum(fft_mags[fundamental_idx*2:]**2))
+    thd = harmonics_mag / fundamental_mag
+    return thd
+
+
+def read_rul_data(filepath, default_spd=0, default_trq=0, default_pwr=0, default_eff=0, force_recompute=False):
+
+    Rs=12.5
     data_read = None
     # 檢查檔案是否存在
     if os.path.exists(filepath):
@@ -305,7 +420,7 @@ def read_rul_data(filepath, default_spd=0, default_trq=0, default_pwr=0, default
              # 補上降採樣信號
             # down sampling from 20k to 10k  
             
-            def lowpass_filter(data, cutoff=1000, fs=20000, order=2):
+            def lowpass_filter(data, cutoff=2000, fs=20000, order=2):
                 data = data.flatten()
                 nyq = 0.5 * fs  # 奈奎斯特頻率
                 normal_cutoff = cutoff / nyq
@@ -332,24 +447,43 @@ def read_rul_data(filepath, default_spd=0, default_trq=0, default_pwr=0, default
                 "Current alpha downsample",
                 "Current beta downsample",
                 "Torque raw", 
-                "Torque avg", 
+                "Torque avg",
+                "Voltage alpha thd",
+                "Voltage beta thd",
+                "Flux alpha",
+                "Flux beta",
             ]
+            
+            # 確認缺少那些欄位
             missing_keys = [k for k in required_keys if k not in df_loaded.columns]
-            
-            
-
-            if missing_keys:
+        
+            if missing_keys or force_recompute:
                 print("Missing keys in the parquet file, recalculating and saving:")
                 # 慮波方法2 FFT暴力慮波
-                voltage_alpha_downsample, _ = filter_top_n_frequencies(Voltage_alpha, 5)
-                voltage_beta_downsample, _ = filter_top_n_frequencies(Voltage_beta, 5)
+                # voltage_alpha_downsample, _ = filter_top_n_frequencies(Voltage_alpha, 5)
+                # voltage_beta_downsample, _ = filter_top_n_frequencies(Voltage_beta, 5)
                 
+                # 極性重新校正
+                voltage_alpha_downsample, voltage_beta_downsample = voltage_calibrate_stator(Voltage_alpha, Voltage_beta, 12, data_read["Speed"][0])
+                thd_alpha = calculate_thd(voltage_alpha_downsample)
+                thd_beta = calculate_thd(voltage_beta_downsample)
+                voltage_alpha_downsample=lowpass_filter(voltage_alpha_downsample, cutoff=5000, fs=20000, order=2)
+                voltage_beta_downsample=lowpass_filter(voltage_beta_downsample, cutoff=5000, fs=20000, order=2)
                 
+                # 計算反電動勢
+                flux_alpha1, flux_beta1=fft_integration(voltage_alpha_downsample.squeeze()-Rs*np.array(data_read["Current alpha downsample"]), 
+                                        voltage_beta_downsample.squeeze()-np.array(Rs*data_read["Current beta downsample"]), Wc=10, fs=20000)  
+
                 data_read["Voltage alpha downsample"] = voltage_alpha_downsample
                 data_read["Voltage beta downsample"] = voltage_beta_downsample
                 data_read["Current alpha downsample"] = current_alpha_downsample
                 data_read["Current beta downsample"] = current_beta_downsample
+                data_read["Voltage alpha thd"] = thd_alpha
+                data_read["Voltage beta thd"] = thd_beta
+                data_read["Flux alpha"] = flux_alpha1
+                data_read["Flux beta"] = flux_beta1
                 
+
                 # 計算FAST 力矩估測
                 torque_raw, _, _, _, _, _=estimate_torque(data_read, speed_v=data_read["Speed"][0], debug=False)
                 # 取 torque_raw 後2/3的資料取平均
@@ -362,7 +496,11 @@ def read_rul_data(filepath, default_spd=0, default_trq=0, default_pwr=0, default
                     "Current alpha downsample": current_alpha_downsample.flatten(),
                     "Current beta downsample": current_beta_downsample.flatten(),
                     "Torque raw": torque_raw.flatten(),
-                    "Torque avg": float(torque_avg)  # 確保為 float64
+                    "Torque avg": float(torque_avg),  # 確保為 float64
+                    "Voltage alpha thd": np.array([thd_alpha]),
+                    "Voltage beta thd": np.array([thd_beta]),
+                    "Flux alpha": flux_alpha1.flatten(),
+                    "Flux beta": flux_beta1.flatten(),
                 }
 
                 # 新增欄位並確保為 object 型別（避免 numpy 寫入錯誤）
@@ -388,11 +526,11 @@ def read_rul_data(filepath, default_spd=0, default_trq=0, default_pwr=0, default
             # data_read["Current beta downsample"] = np.array(df_loaded["Current beta downsample"].iloc[0])
             data_read["Torque raw"] = np.array(df_loaded["Torque raw"].iloc[0])
             data_read["Torque avg"] = df_loaded["Torque avg"].iloc[0]
-
-
-
-
-                
+            data_read["Voltage alpha thd"] = df_loaded["Voltage alpha thd"].iloc[0]
+            data_read["Voltage beta thd"] = df_loaded["Voltage beta thd"].iloc[0]
+            data_read["Flux alpha"] = np.array(df_loaded["Flux alpha"].iloc[0])
+            data_read["Flux beta"] = np.array(df_loaded["Flux beta"].iloc[0])
+            # print("Data read from parquet:", data_read.keys())
 
         elif filepath.endswith('.csv'):
             # csv read code version
@@ -422,126 +560,114 @@ def read_rul_data(filepath, default_spd=0, default_trq=0, default_pwr=0, default
         print(f"檔案 {filepath} 不存在，請確認檔案路徑。")
     return data_read
 
-# def read_rul_data(filepath, default_spd=0, default_trq=0, default_pwr=0, default_eff=0, force_recompute=False):
-#     data_read = None
+def read_rul_data_v2(filepath, default_spd=0, default_trq=0, default_pwr=0, default_eff=0, force_recompute=False):
+    data_read = None
 
-#     if not os.path.exists(filepath):
-#         print(f"檔案 {filepath} 不存在，請確認檔案路徑。")
-#         return None
+    if not os.path.exists(filepath):
+        print(f"檔案 {filepath} 不存在，請確認檔案路徑。")
+        return None
 
-#     # 通用 FFT 過濾器 (placeholder)
-#     def lowpass_filter(data, cutoff=1000, fs=20000, order=2):
-#         data = data.flatten()
-#         nyq = 0.5 * fs
-#         normal_cutoff = cutoff / nyq
-#         b, a = butter(order, normal_cutoff, btype='low', analog=False)
-#         y = filtfilt(b, a, data)
-#         return y
+    # 通用 FFT 過濾器 (placeholder)
+    def lowpass_filter(data, cutoff=5000, fs=20000, order=2):
+        data = data.flatten()
+        nyq = 0.5 * fs
+        normal_cutoff = cutoff / nyq
+        b, a = butter(order, normal_cutoff, btype='low', analog=False)
+        y = filtfilt(b, a, data)
+        return y
 
-#     if filepath.endswith('.parquet'):
-#         df_loaded = pd.read_parquet(filepath)
+    if filepath.endswith('.parquet'):
+        df_loaded = pd.read_parquet(filepath)
 
-#         data_read = {
-#             "Unix Time": [df_loaded["Unix Time"].iloc[0]],
-#             "Speed": [df_loaded["Speed"].iloc[0]],
-#             "Torque": [df_loaded["Torque"].iloc[0]],
-#             "Power": [df_loaded["Power"].iloc[0]],
-#             "Efficiency": [df_loaded["Efficiency"].iloc[0]],
-#             "vibration rms": [df_loaded["vibration rms"].iloc[0]] if "vibration rms" in df_loaded else [],
-#             "Voltage alpha": np.array(df_loaded["Voltage alpha"].iloc[0]),
-#             "Voltage beta": np.array(df_loaded["Voltage beta"].iloc[0]),
-#             "Current alpha": np.array(df_loaded["Current alpha"].iloc[0]),
-#             "Current beta": np.array(df_loaded["Current beta"].iloc[0]),
-#             "vibration data": np.array(df_loaded["raw_pico_data"].iloc[0]) if "raw_pico_data" in df_loaded else [],
-#         }
+        data_read = {
+            "Unix Time": [df_loaded["Unix Time"].iloc[0]],
+            "Speed": [df_loaded["Speed"].iloc[0]],
+            "Torque": [df_loaded["Torque"].iloc[0]],
+            "Power": [df_loaded["Power"].iloc[0]],
+            "Efficiency": [df_loaded["Efficiency"].iloc[0]],
+            "vibration rms": [df_loaded["vibration rms"].iloc[0]] if "vibration rms" in df_loaded else [],
+            "Voltage alpha": np.array(df_loaded["Voltage alpha"].iloc[0]),
+            "Voltage beta": np.array(df_loaded["Voltage beta"].iloc[0]),
+            "Current alpha": np.array(df_loaded["Current alpha"].iloc[0]),
+            "Current beta": np.array(df_loaded["Current beta"].iloc[0]),
+            "vibration data": np.array(df_loaded["raw_pico_data"].iloc[0]) if "raw_pico_data" in df_loaded else [],
+            # non default values
+            "Voltage alpha downsample": np.array(df_loaded["Voltage alpha downsample"].iloc[0]) if "Voltage alpha downsample" in df_loaded else [],
+            "Voltage beta downsample": np.array(df_loaded["Voltage beta downsample"].iloc[0]) if "Voltage beta downsample" in df_loaded else [],
+            "Current alpha downsample": np.array(df_loaded["Current alpha downsample"].iloc[0]) if "Current alpha downsample" in df_loaded else [],
+            "Current beta downsample": np.array(df_loaded["Current beta downsample"].iloc[0]) if "Current beta downsample" in df_loaded else [],
+            
+            "test" : [] if "test" not in df_loaded.columns else df_loaded["test"].iloc[0],
+        }
 
-#         # RMS from vibration if missing
-#         if "raw_pico_data" in df_loaded and not data_read["vibration rms"]:
-#             data_read["vibration rms"] = [np.sqrt(np.mean(np.square(data_read["vibration data"])))]
+        # RMS from vibration if missing
+        if "raw_pico_data" in df_loaded and not data_read["vibration rms"]:
+            data_read["vibration rms"] = [np.sqrt(np.mean(np.square(data_read["vibration data"])))]
 
-#         # 時間範圍內修正電流倍率
-#         unix_time = int(data_read["Unix Time"][0])
-#         if 1748361600 <= unix_time <= 1750780800:
-#             data_read["Current alpha"] /= 10
-#             data_read["Current beta"] /= 10
+        # 時間範圍內修正電流倍率
+        unix_time = int(data_read["Unix Time"][0])
+        if 1748361600 <= unix_time <= 1750780800:
+            data_read["Current alpha"] /= 10
+            data_read["Current beta"] /= 10
 
-#         # 計算 current downsample
-#         try:
-#             data_read["Current alpha downsample"] = lowpass_filter(data_read["Current alpha"], cutoff=5000)
-#             data_read["Current beta downsample"] = lowpass_filter(data_read["Current beta"], cutoff=5000)
-#         except Exception as e:
-#             print(f"Downsampling error: {e} @ {filepath}")
-#             raise
+        # # 計算 current downsample
+        # try:
+        #     data_read["Current alpha downsample"] = lowpass_filter(data_read["Current alpha"], cutoff=5000)
+        #     data_read["Current beta downsample"] = lowpass_filter(data_read["Current beta"], cutoff=5000)
+        # except Exception as e:
+        #     print(f"Downsampling error: {e} @ {filepath}")
+        #     raise
 
-#         # 檢查需補的欄位
-#         required_keys = [
-#             "Voltage alpha downsample",
-#             "Voltage beta downsample",
-#             "Current alpha downsample",
-#             "Current beta downsample",
-#             "Torque raw", 
-#             "Torque avg"
-#         ]
-#         missing_keys = [k for k in required_keys if k not in df_loaded.columns]
+        # # 檢查需補的欄位
+        # required_keys = [
+        #     "Voltage alpha downsample",
+        #     "Voltage beta downsample",
+        #     "Current alpha downsample",
+        #     "Current beta downsample",
+        #     "Torque raw", 
+        #     "Torque avg"
+        # ]
+        # missing_keys = [k for k in required_keys if k not in df_loaded.columns]
 
-#         if missing_keys or force_recompute:
-#             print(f"[{os.path.basename(filepath)}] 缺少欄位或強制重新計算，處理中...")
+        # if missing_keys or force_recompute:
+        #     print(f"[{os.path.basename(filepath)}] 缺少欄位或強制重新計算，處理中...")
 
-#             # FFT 過濾處理（需自行定義）
-#             voltage_alpha_downsample, _ = filter_top_n_frequencies(data_read["Voltage alpha"], 5)
-#             voltage_beta_downsample, _ = filter_top_n_frequencies(data_read["Voltage beta"], 5)
+        #     # FFT 過濾處理（需自行定義）
+        #     voltage_alpha_downsample, _ = filter_top_n_frequencies(data_read["Voltage alpha"], 5)
+        #     voltage_beta_downsample, _ = filter_top_n_frequencies(data_read["Voltage beta"], 5)
 
-#             data_read["Voltage alpha downsample"] = voltage_alpha_downsample
-#             data_read["Voltage beta downsample"] = voltage_beta_downsample
+        #     data_read["Voltage alpha downsample"] = voltage_alpha_downsample
+        #     data_read["Voltage beta downsample"] = voltage_beta_downsample
 
-#             # 計算 torque（需自行定義）
-#             torque_raw, _, _, _, _, _ = estimate_torque(data_read, speed_v=data_read["Speed"][0], debug=False)
-#             torque_avg = np.mean(torque_raw[-(len(torque_raw) * 2 // 3):])
+        #     # 計算 torque（需自行定義）
+        #     torque_raw, _, _, _, _, _ = estimate_torque(data_read, speed_v=data_read["Speed"][0], debug=False)
+        #     torque_avg = np.mean(torque_raw[-(len(torque_raw) * 2 // 3):])
 
-#             # 儲存回 parquet
-#             new_cols = {
-#                 "Voltage alpha downsample": voltage_alpha_downsample.flatten().tolist(),
-#                 "Voltage beta downsample": voltage_beta_downsample.flatten().tolist(),
-#                 "Current alpha downsample": data_read["Current alpha downsample"].flatten().tolist(),
-#                 "Current beta downsample": data_read["Current beta downsample"].flatten().tolist(),
-#                 "Torque raw": torque_raw.flatten().tolist(),
-#                 "Torque avg": float(torque_avg)
-#             }
+        #     # 儲存回 parquet
+        #     new_cols = {
+        #         "Voltage alpha downsample": voltage_alpha_downsample.flatten().tolist(),
+        #         "Voltage beta downsample": voltage_beta_downsample.flatten().tolist(),
+        #         "Current alpha downsample": data_read["Current alpha downsample"].flatten().tolist(),
+        #         "Current beta downsample": data_read["Current beta downsample"].flatten().tolist(),
+        #         "Torque raw": torque_raw.flatten().tolist(),
+        #         "Torque avg": float(torque_avg)
+        #         ""
+        #     }
 
-#             for col, val in new_cols.items():
-#                 df_loaded[col] = pd.Series([None] * len(df_loaded), dtype=object)
-#                 df_loaded.at[0, col] = val
+        #     for col, val in new_cols.items():
+        #         df_loaded[col] = pd.Series([None] * len(df_loaded), dtype=object)
+        #         df_loaded.at[0, col] = val
 
-#             df_loaded.to_parquet(filepath, engine="pyarrow", index=False)
+        #     df_loaded.to_parquet(filepath, engine="pyarrow", index=False)
 
-#         # 重新讀回完整欄位
-#         df_loaded = pd.read_parquet(filepath)
-#         data_read["Voltage alpha downsample"] = np.array(df_loaded["Voltage alpha downsample"].iloc[0])
-#         data_read["Voltage beta downsample"] = np.array(df_loaded["Voltage beta downsample"].iloc[0])
-#         data_read["Torque raw"] = np.array(df_loaded["Torque raw"].iloc[0])
-#         data_read["Torque avg"] = df_loaded["Torque avg"].iloc[0]
+        # # 重新讀回完整欄位
+        # df_loaded = pd.read_parquet(filepath)
+        # data_read["Voltage alpha downsample"] = np.array(df_loaded["Voltage alpha downsample"].iloc[0])
+        # data_read["Voltage beta downsample"] = np.array(df_loaded["Voltage beta downsample"].iloc[0])
+        # data_read["Torque raw"] = np.array(df_loaded["Torque raw"].iloc[0])
+        # data_read["Torque avg"] = df_loaded["Torque avg"].iloc[0]
 
-#     elif filepath.endswith(".csv"):
-#         with open(filepath, "r") as f:
-#             unix_time = f.readline().strip().split(",")[1]
-#         df_loaded = pd.read_csv(filepath, skiprows=1)
-
-#         data_read = {
-#             "Unix Time": [int(unix_time)],
-#             "Speed": [default_spd],
-#             "Torque": [default_trq],
-#             "Power": [default_pwr],
-#             "Efficiency": [default_eff],
-#             "Voltage alpha": df_loaded["V_alpha"].to_numpy(),
-#             "Voltage beta": df_loaded["V_beta"].to_numpy(),
-#             "Current alpha": df_loaded["I_alpha"].to_numpy(),
-#             "Current beta": df_loaded["I_beta"].to_numpy(),
-#         }
-
-#     else:
-#         print(f"不支援的檔案格式：{filepath}")
-
-#     return data_read
+    return data_read
     
 
 if __name__ == '__main__':
