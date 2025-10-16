@@ -1,4 +1,7 @@
 {
   "python.defaultInterpreterPath": "C:\\Users\\MotorTech\\PycharmProjects\\Tecom_AQbox_Master\\venv\\Scripts\\python.exe",
-  "python.envFile": "${workspaceFolder}\\.env"
+  "python.envFile": "${workspaceFolder}\\.env",
+  "python-envs.pythonProjects": [],
+  "python-envs.defaultEnvManager": "ms-python.python:conda",
+  "python-envs.defaultPackageManager": "ms-python.python:conda"
 }
